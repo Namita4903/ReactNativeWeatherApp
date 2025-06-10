@@ -1,16 +1,21 @@
 import { fetchLocations, fetchWeatherForecast } from "@/api/weather";
 import { weatherImages } from "@/constants";
+import AsyncStorage from '@react-native-async-storage/async-storage';
+import * as Location from 'expo-location';
 import { debounce } from "lodash";
 import { useCallback, useEffect, useState } from "react";
 import {
+  Alert,
   Image,
+  Linking,
+  Platform,
   SafeAreaView,
   ScrollView,
   StatusBar,
   Text,
   TextInput,
   TouchableOpacity,
-  View,
+  View
 } from "react-native";
 import {
   CalendarDaysIcon,
@@ -26,8 +31,152 @@ export default function Index() {
   const [weather, setWeather] = useState({});
   const [loading, setLoading] = useState(true);
 
+  const storeLastLocation = async (cityName) => {
+    try {
+      await AsyncStorage.setItem('lastLocation', cityName);
+      console.log('Stored location:', cityName);
+    } catch (error) {
+      console.log('Error storing location:', error);
+    }
+  };
+
+  const getLastLocation = async () => {
+    try {
+      const location = await AsyncStorage.getItem('lastLocation');
+      console.log('Retrieved stored location:', location);
+      return location;
+    } catch (error) {
+      console.log('Error getting stored location:', error);
+      return null;
+    }
+  };
+
+  const fetchWeatherByLocation = async (latitude, longitude) => {
+    try {
+      console.log('Fetching weather for:', latitude, longitude);
+      const data = await fetchWeatherForecast({
+        cityName: `${latitude},${longitude}`,
+        days: 7
+      });
+      console.log('Weather data received:', data ? 'yes' : 'no');
+      if (data) {
+        setWeather(data);
+        // Store the location name when we get weather data
+        if (data.location?.name) {
+          storeLastLocation(data.location.name);
+        }
+        setLoading(false);
+      } else {
+        console.log('No weather data received');
+        fetchLastLocationWeather();
+      }
+    } catch (error) {
+      console.log('Error fetching weather by location:', error);
+      fetchLastLocationWeather();
+    }
+  };
+
+  const fetchLastLocationWeather = async () => {
+    try {
+      const lastLocation = await getLastLocation();
+      if (lastLocation) {
+        console.log('Fetching weather for last location:', lastLocation);
+        const data = await fetchWeatherForecast({
+          cityName: lastLocation,
+          days: 7
+        });
+        setWeather(data);
+      } else {
+        console.log('No stored location, fetching default city weather');
+        fetchDefaultCityWeather();
+      }
+    } catch (error) {
+      console.log('Error fetching last location weather:', error);
+      fetchDefaultCityWeather();
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const fetchDefaultCityWeather = async () => {
+    try {
+      console.log('Fetching default city weather');
+      const data = await fetchWeatherForecast({
+        cityName: "Islamabad",
+        days: 7
+      });
+      setWeather(data);
+      if (data?.location?.name) {
+        storeLastLocation(data.location.name);
+      }
+    } catch (error) {
+      console.log('Error fetching default weather:', error);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const requestLocationPermission = async () => {
+    try {
+      // First check the current permission status
+      const { status: existingStatus } = await Location.getForegroundPermissionsAsync();
+      
+      if (existingStatus === 'denied') {
+        // If permission was previously denied, show an alert explaining why we need location
+        Alert.alert(
+          'Location Permission Required',
+          'We need your location to show accurate weather information. Would you like to enable location access?',
+          [
+            {
+              text: 'No Thanks',
+              onPress: () => fetchLastLocationWeather(),
+              style: 'cancel'
+            },
+            {
+              text: 'Open Settings',
+              onPress: async () => {
+                // Open device settings based on platform
+                if (Platform.OS === 'ios') {
+                  await Linking.openURL('app-settings:');
+                } else {
+                  await Linking.openSettings();
+                }
+                fetchLastLocationWeather(); // Show last location while user might change settings
+              }
+            }
+          ]
+        );
+        return;
+      }
+
+      // Request permission if not denied
+      const { status } = await Location.requestForegroundPermissionsAsync();
+      
+      if (status === 'granted') {
+        const location = await Location.getCurrentPositionAsync({});
+        await fetchWeatherByLocation(
+          location.coords.latitude,
+          location.coords.longitude
+        );
+      } else {
+        Alert.alert(
+          'Location Access Denied',
+          'Showing weather for your last searched location',
+          [{ text: 'OK' }]
+        );
+        await fetchLastLocationWeather();
+      }
+    } catch (error) {
+      console.log('Error in location permission:', error);
+      await fetchLastLocationWeather();
+    }
+  };
+
+  useEffect(() => {
+    requestLocationPermission();
+  }, []);
+
   const handleLocations = (loc) => {
-    console.log("location", loc);
     setLocations([]);
     toggleSearch(false);
     setLoading(true);
@@ -36,9 +185,9 @@ export default function Index() {
       days: 7,
     }).then((data) => {
       setWeather(data);
+      // Store the location when user manually searches
+      storeLastLocation(loc.name);
       setLoading(false);
-      //  console.log("got forecast", data)
-      storeData("city", loc.name);
     });
   };
 
@@ -48,23 +197,6 @@ export default function Index() {
         setLocations(data);
       });
     }
-  };
-
-  useEffect(() => {
-    fetchMyWeatherData();
-  }, []);
-
-  const fetchMyWeatherData = async () => {
-    let myCity = await getData("city");
-    let cityName = "Islamabad";
-    if (myCity) cityName = myCity;
-    fetchWeatherForecast({
-      cityName,
-      days: 7,
-    }).then((data) => {
-      setWeather(data);
-      setLoading(false);
-    });
   };
 
   const handleTextDebounce = useCallback(debounce(handleSearch, 1200), []);
@@ -85,7 +217,7 @@ export default function Index() {
         </View>
       ) : (
         <SafeAreaView className="flex flex-1">
-          {/* serach section */}
+          {/* search section */}
           <View style={{ height: "10%" }} className="mx-4 relative z-50">
             <View
               className="flex-row justify-end items-center rounded-full mt-7"
@@ -138,7 +270,8 @@ export default function Index() {
               </View>
             ) : null}
           </View>
-          {/*forecast section*/}
+
+          {/* forecast section */}
           <View className="mx-4 flex justify-around flex-1 mb-2">
             {/* location */}
             <Text className="text-white text-center text-2xl font-bold">
@@ -175,7 +308,7 @@ export default function Index() {
                   className="w-6 h-6"
                 />
                 <Text className="text-white text-base font-semibold">
-                  {current?.wind_kph} Km/hr
+                  {current?.wind_kph} km/h
                 </Text>
               </View>
               <View className="flex-row space-x-2 items-center">
@@ -184,7 +317,7 @@ export default function Index() {
                   className="w-6 h-6 bg-inherit"
                 />
                 <Text className="text-white text-base font-semibold">
-                  {current?.humidity} %
+                  {current?.humidity}%
                 </Text>
               </View>
               <View className="flex-row space-x-2 items-center">
@@ -203,7 +336,7 @@ export default function Index() {
           <View className="mb-2 space-y-3">
             <View className="flex-row items-center mx-5 space-x-2">
               <CalendarDaysIcon size={22} color={"white"} />
-              <Text className="text-white text-base"> Daily Forecast</Text>
+              <Text className="text-white text-base">Daily Forecast</Text>
             </View>
             <ScrollView
               horizontal
